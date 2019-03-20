@@ -1,0 +1,58 @@
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
+    <PreferenceCategory
+        android:title="Reporting">
+
+        <SeekBarPreference
+            android:key="rptthreshold"
+            android:title="Reporting threshold"
+            android:summary="Min confidence (%) allowed before reporting a match over a network"
+            android:max="100"
+            android:defaultValue="65" />
+
+        <SeekBarPreference
+            android:key="maxrptrate"
+            android:title="Max Reporting Rate"
+            android:summary="Minimum time (minutes) between reporting detecting the same face"
+            android:max="30"
+            android:defaultValue="5" />
+
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        android:title="OGC SOS">
+
+        <EditTextPreference
+            android:key="callsign"
+            android:title="Sensor callsign"
+            android:summary="Name this device should use on a network" />
+
+        <CheckBoxPreference
+            android:key="sendtosos"
+            android:title="Send to network SOS"
+            android:summary="Sends sensor reports to an OGC Sensor Observation Service (SOS) server on a network"
+            android:defaultValue="true"/>
+
+        <EditTextPreference
+            android:key="sosurl"
+            android:title="SOS URL"
+            android:summary="The network address of the SOS server"
+            android:hint="http://example.com/sensorhub/sos"
+            android:dependency="sendtosos"/>
+
+        <EditTextPreference
+            android:key="sosusr"
+            android:title="Username"
+            android:summary="The username for this SOS server (or leave blank for none)"
+            android:hint="Username"
+            android:dependency="sendtosos"/>
+
+        <EditTextPreference
+            android:key="sospwd"
+            android:title="Password"
+            android:summary="The password for this SOS server (or leave blank for none)"
+            android:hint="Password"
+            android:dependency="sendtosos"/>
+
+    </PreferenceCategory>
+
+</PreferenceScreen>

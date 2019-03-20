@@ -18,6 +18,7 @@ package pp.facerecognizer;
 
 import android.content.ClipData;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.res.AssetManager;
 import android.graphics.Bitmap;
 import android.graphics.Bitmap.Config;
@@ -30,6 +31,8 @@ import android.media.ImageReader.OnImageAvailableListener;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.SystemClock;
+import android.preference.PreferenceManager;
+import android.util.Log;
 import android.util.Size;
 import android.util.TypedValue;
 import android.view.View;
@@ -39,10 +42,19 @@ import android.widget.FrameLayout;
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
 import com.google.android.material.snackbar.Snackbar;
 
+import org.sofwerx.ogc.sos.SensorMeasurement;
+import org.sofwerx.ogc.sos.SensorMeasurementTime;
+import org.sofwerx.ogc.sos.SensorResultTemplateField;
+import org.sofwerx.ogc.sos.SensorTextResultTemplateField;
+import org.sofwerx.ogc.sos.SosSensor;
+import org.sofwerx.ogc.sos.SosService;
+
 import java.io.File;
+import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Random;
 import java.util.Vector;
 
 import androidx.appcompat.app.AlertDialog;
@@ -57,6 +69,7 @@ import pp.facerecognizer.tracking.MultiBoxTracker;
 * objects.
 */
 public class MainActivity extends CameraActivity implements OnImageAvailableListener {
+    private final static String TAG = "AFD";
     private static final Logger LOGGER = new Logger();
 
     private static final int FACE_SIZE = 160;
@@ -92,9 +105,23 @@ public class MainActivity extends CameraActivity implements OnImageAvailableList
     private Snackbar initSnackbar;
     private Snackbar trainSnackbar;
     private FloatingActionButton button;
+    private FloatingActionButton buttonSettings;
 
     private boolean initialized = false;
     private boolean training = false;
+
+    //SOS
+    private boolean reportOverSos;
+    private SosService sosService;
+    private SosSensor sosSensor;
+    private SensorMeasurementTime sensorMeasurementTime;
+    private SensorMeasurement sensorMeasurementName;
+    private SensorMeasurement sensorMeasurementConfidence;
+
+    private String sosURL, callsign, sensorId, sosUsername, sosPassword;
+    private float sosConfidenceToReport;
+    private long maxReportingInterval;
+    private long nextAvailableReportingTime = Long.MIN_VALUE;
 
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
@@ -127,6 +154,51 @@ public class MainActivity extends CameraActivity implements OnImageAvailableList
                             }
                         })
                         .show());
+
+        buttonSettings = findViewById(R.id.settings_button);
+        buttonSettings.setOnClickListener(view ->
+                startActivity(new Intent(MainActivity.this,SettingsActivity.class)));
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        checkPreferences();
+    }
+
+    private void checkPreferences() {
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(getApplicationContext());
+        reportOverSos = prefs.getBoolean("sendtosos",true);
+        callsign = prefs.getString("callsign",null);
+        if ((callsign == null) || (callsign.length() == 0)) {
+            callsign = generateCallsign();
+            SharedPreferences.Editor edit = prefs.edit();
+            edit.putString("callsign",callsign).apply();
+        }
+        sensorId = callsign.replace(' ','-').toLowerCase()+"-afd";
+        sosURL = prefs.getString("sosurl",null);
+        sosUsername = prefs.getString("sosusr",null);
+        sosPassword = prefs.getString("sospwd",null);
+        sosConfidenceToReport = ((float)prefs.getInt("rptthreshold",65))/100f;
+        maxReportingInterval = (long)prefs.getInt("maxrptrate",1)*1000l*60l;
+    }
+
+    private String generateCallsign() {
+        Random random = new Random();
+        StringWriter out = new StringWriter();
+
+        out.append("AFD ");
+        out.append(Integer.toString(random.nextInt(10)));
+        out.append(Integer.toString(random.nextInt(10)));
+
+        return out.toString();
+    }
+
+    @Override
+    public void onDestroy() {
+        if (sosService != null)
+            sosService.shutdown();
+        super.onDestroy();
     }
 
     @Override
@@ -280,6 +352,44 @@ public class MainActivity extends CameraActivity implements OnImageAvailableList
                     cropCopyBitmap = Bitmap.createBitmap(croppedBitmap);
                     List<Classifier.Recognition> mappedRecognitions =
                             classifier.recognizeImage(croppedBitmap,cropToFrameTransform);
+
+                    //check to see if there is something to report
+                    if (reportOverSos && (sosURL != null) && (System.currentTimeMillis() > nextAvailableReportingTime)) {
+                        Classifier.Recognition top = null;
+                        if (mappedRecognitions != null) {
+                            for (Classifier.Recognition recog : mappedRecognitions) {
+                                if ((recog != null) && !"unknown".equalsIgnoreCase(recog.getTitle())) {
+                                    if (top == null)
+                                        top = recog;
+                                    else {
+                                        if (top.getConfidence() < recog.getConfidence())
+                                            top = recog;
+                                    }
+                                }
+                            }
+                        }
+                        //only report the highest confidence recognition
+                        if ((top != null) && (top.getConfidence() > sosConfidenceToReport)) {
+                            Log.d(TAG,"Reporting "+top.getTitle()+" ("+(int)(top.getConfidence()*100f)+"%) to SOS server");
+                            if (sosSensor == null) {
+                                sosSensor = new SosSensor(callsign, sensorId, "AFD", "Facial Recognition");
+                                sensorMeasurementTime = new SensorMeasurementTime();
+                                sensorMeasurementName = new SensorMeasurement(new SensorTextResultTemplateField("Name","http://www.sofwerx.org/afd.owl#name"));
+                                sensorMeasurementConfidence = new SensorMeasurement(new SensorResultTemplateField("Confidence","http://www.sofwerx.org/afd.owl#confidence","p value"));
+                                sosSensor.addMeasurement(sensorMeasurementTime);
+                                sosSensor.addMeasurement(sensorMeasurementName);
+                                sosSensor.addMeasurement(sensorMeasurementConfidence);
+                            }
+                            sensorMeasurementTime.setValue(System.currentTimeMillis());
+                            sensorMeasurementName.setValue("\""+top.getTitle().replace(' ','-')+"\"");
+                            sensorMeasurementConfidence.setValue(top.getConfidence());
+                            if (sosService == null)
+                                sosService = new SosService(MainActivity.this, sosSensor, sosURL, sosUsername, sosPassword, true, false);
+                            else
+                                sosService.broadcastSensorReadings();
+                            nextAvailableReportingTime = System.currentTimeMillis() + maxReportingInterval;
+                        }
+                    }
 
                     lastProcessingTimeMs = SystemClock.uptimeMillis() - startTime;
                     tracker.trackResults(mappedRecognitions, luminanceCopy, currTimestamp);
